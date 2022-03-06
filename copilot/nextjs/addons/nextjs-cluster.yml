@@ -1,0 +1,116 @@
+Parameters:
+  App:
+    Type: String
+    Description: Your application's name.
+  Env:
+    Type: String
+    Description: The environment name your service, job, or workflow is being deployed to.
+  Name:
+    Type: String
+    Description: The name of the service, job, or workflow being deployed.
+  ServiceSecurityGroupId:
+    Type: String
+    Description: The security group associated with the VPC connector.
+  # Customize your Aurora Serverless cluster by setting the default value of the following parameters.
+  nextjsclusterDBName:
+    Type: String
+    Description: The name of the initial database to be created in the DB cluster.
+    Default: app
+
+Resources:
+  nextjsclusterDBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: Group of Copilot private subnets for Aurora cluster.
+      SubnetIds:
+        !Split [',', { 'Fn::ImportValue': !Sub '${App}-${Env}-PrivateSubnets' }]
+  nextjsclusterDBClusterSecurityGroup:
+    Metadata:
+      'aws:copilot:description': 'A security group for your DB cluster nextjscluster'
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: The Security Group for the database cluster.
+      SecurityGroupIngress:
+        - ToPort: 3306
+          FromPort: 3306
+          IpProtocol: tcp
+          Description: !Sub 'From the Aurora Security Group of the workload ${Name}.'
+          SourceSecurityGroupId: !Ref ServiceSecurityGroupId
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${App}-${Env}-VpcId'
+
+  nextjsclusterAuroraSecret:
+    Metadata:
+      'aws:copilot:description': 'A Secrets Manager secret to store your DB credentials'
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub Aurora main user secret for ${AWS::StackName}
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: "password"
+        ExcludePunctuation: true
+        IncludeSpace: false
+        PasswordLength: 16
+
+  nextjsclusterAuroraSecretAccessPolicy:
+    Metadata:
+      'aws:copilot:description': 'An IAM ManagedPolicy for your service to access the DB credentials secret'
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: !Sub
+        - Grants read access to the ${Secret} secret
+        - { Secret: !Ref nextjsclusterAuroraSecret }
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: SecretActions
+            Effect: Allow
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource:
+              - !Ref nextjsclusterAuroraSecret
+  nextjsclusterDBClusterParameterGroup:
+    Metadata:
+      'aws:copilot:description': 'A DB parameter group for engine configuration values'
+    Type: 'AWS::RDS::DBClusterParameterGroup'
+    Properties:
+      Description: !Ref 'AWS::StackName'
+      Family: 'aurora-mysql5.7'
+      Parameters:
+        character_set_client: 'utf8'
+  nextjsclusterDBCluster:
+    Metadata:
+      'aws:copilot:description': 'The nextjscluster Aurora provisioned database cluster'
+    Type: 'AWS::RDS::DBCluster'
+    Properties:
+      MasterUsername:
+        !Join [ "",  [ '{{resolve:secretsmanager:', !Ref nextjsclusterAuroraSecret, ":SecretString:username}}" ]]
+      MasterUserPassword:
+        !Join [ "",  [ '{{resolve:secretsmanager:', !Ref nextjsclusterAuroraSecret, ":SecretString:password}}" ]]
+      DatabaseName: !Sub '${nextjsclusterDBName}_${Env}'
+      Engine: 'aurora-mysql'
+      EngineVersion: '5.7.mysql_aurora.2.10.2'
+      DBClusterParameterGroupName: !Ref nextjsclusterDBClusterParameterGroup
+      DBSubnetGroupName: !Ref nextjsclusterDBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref nextjsclusterDBClusterSecurityGroup
+  nextjsclusterDBInstance1:
+    Properties:
+      DBClusterIdentifier: !Ref 'nextjsclusterDBCluster'
+      DBInstanceClass: db.t2.small
+      Engine: aurora-mysql
+    Type: AWS::RDS::DBInstance
+  nextjsclusterSecretAuroraClusterAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref nextjsclusterAuroraSecret
+      TargetId: !Ref nextjsclusterDBCluster
+      TargetType: AWS::RDS::DBCluster
+Outputs:
+  nextjsclusterAuroraSecretAccessPolicy: # Automatically augment your instance role with this managed policy.
+    Description: "Add the IAM ManagedPolicy to your instance role"
+    Value: !Ref nextjsclusterAuroraSecretAccessPolicy
+  nextjsclusterSecret: # Inject this secret ARN in your manifest file.
+    Description: "The secret ARN that holds the database username and password in JSON format. Fields are 'host', 'port', 'dbname', 'username', 'password', 'dbClusterIdentifier' and 'engine'"
+    Value: !Ref nextjsclusterAuroraSecret
